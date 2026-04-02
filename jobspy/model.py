@@ -7,6 +7,21 @@ from enum import Enum
 from pydantic import BaseModel
 
 
+class WorkFormat(Enum):
+    ONSITE = "onsite"
+    HYBRID = "hybrid"
+    REMOTE = "remote"
+
+
+class SeniorityLevel(Enum):
+    INTERNSHIP = "internship"
+    ENTRY = "entry"
+    ASSOCIATE = "associate"
+    MID_SENIOR = "mid_senior"
+    DIRECTOR = "director"
+    EXECUTIVE = "executive"
+
+
 class JobType(Enum):
     FULL_TIME = (
         "fulltime",
@@ -253,6 +268,7 @@ class JobPost(BaseModel):
     date_posted: date | None = None
     emails: list[str] | None = None
     is_remote: bool | None = None
+    work_format: WorkFormat | None = None
     listing_type: str | None = None
 
     # LinkedIn specific
@@ -315,6 +331,9 @@ class ScraperInput(BaseModel):
     linkedin_fetch_description: bool = False
     linkedin_company_ids: list[int] | None = None
     description_format: DescriptionFormat | None = DescriptionFormat.MARKDOWN
+    work_format: WorkFormat | None = None
+    seniority_levels: list[SeniorityLevel] | None = None
+    linkedin_use_keyword_work_format_fallback: bool = True
 
     request_timeout: int = 60
 

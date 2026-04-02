@@ -13,6 +13,11 @@ keywords = [ "jobs-scraper", "linkedin", "indeed", "glassdoor", "ziprecruiter", 
 [[tool.poetry.packages]]
 include = "jobspy"
 
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that hit real external services (LinkedIn, Indeed, etc.)",
+]
+
 [tool.black]
 line-length = 88
 

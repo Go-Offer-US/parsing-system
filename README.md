@@ -34,6 +34,8 @@ jobs = scrape_jobs(
     country_indeed='USA',
     
     # linkedin_fetch_description=True # gets more info such as description, direct job url (slower)
+    # work_format="remote",            # filter by work arrangement: "remote", "hybrid", "onsite" (LinkedIn only)
+    # seniority_levels=["mid_senior"], # filter by seniority (LinkedIn only); see README for all values
     # proxies=["208.195.175.46:65095", "208.195.175.45:65095", "localhost"],
 )
 print(f"Found {len(jobs)} jobs")
@@ -79,7 +81,23 @@ Optional
 |    in format ['user:pass@host:port', 'localhost']
 |    each job board scraper will round robin through the proxies
 |
-├── is_remote (bool)
+├── is_remote (bool):
+|    legacy shorthand for work_format="remote". Use work_format instead.
+│
+├── work_format (str):
+|    filter by work arrangement: "remote", "hybrid", "onsite"
+|    (LinkedIn only; single value — run separate queries for multiple formats)
+|    overrides is_remote if both are provided
+|
+├── seniority_levels (list[str]):
+|    filter by seniority level (LinkedIn only):
+|    "internship", "entry", "associate", "mid_senior", "director", "executive"
+|    multiple values are combined as OR
+|
+├── linkedin_use_keyword_work_format_fallback (bool):
+|    when True, falls back to keyword matching in title/description/location
+|    to detect work_format when neither filter nor detail page provides it
+|    (default is True — set to False for strict structured-data-only detection)
 │
 ├── results_wanted (int): 
 |    number of job results to retrieve for each site specified in 'site_name'
@@ -225,6 +243,7 @@ JobPost
 │   ├── city
 │   ├── state
 ├── is_remote
+├── work_format: onsite, hybrid, remote
 ├── description
 ├── job_type: fulltime, parttime, internship, contract
 ├── job_function
@@ -237,7 +256,8 @@ JobPost
 └── emails
 
 Linkedin specific
-└── job_level
+├── job_level
+└── work_format (populated via: filter → detail page → keyword fallback)
 
 Linkedin & Indeed specific
 └── company_industry

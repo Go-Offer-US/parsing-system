@@ -14,11 +14,15 @@ from bs4.element import Tag
 from jobspy.exception import LinkedInException
 from jobspy.linkedin.constant import headers
 from jobspy.linkedin.util import (
+    LINKEDIN_SENIORITY_CODE,
+    LINKEDIN_WORK_FORMAT_CODE,
     is_job_remote,
     job_type_code,
     parse_job_type,
     parse_job_level,
-    parse_company_industry
+    parse_company_industry,
+    parse_work_format_from_page,
+    determine_work_format,
 )
 from jobspy.model import (
     JobPost,
@@ -92,11 +96,30 @@ class LinkedIn(Scraper):
             log.info(
                 f"search page: {request_count} / {math.ceil(scraper_input.results_wanted / 10)}"
             )
+            # Determine f_WT: work_format takes priority over legacy is_remote flag.
+            # LinkedIn f_WT values: 1=Onsite, 2=Remote, 3=Hybrid
+            if scraper_input.work_format:
+                f_wt = str(LINKEDIN_WORK_FORMAT_CODE[scraper_input.work_format])
+            elif scraper_input.is_remote:
+                # Backward compatibility: is_remote=True maps to Remote (2)
+                f_wt = "2"
+            else:
+                f_wt = None
+
+            f_e = None
+            if scraper_input.seniority_levels:
+                f_e = ",".join(
+                    str(LINKEDIN_SENIORITY_CODE[sl])
+                    for sl in scraper_input.seniority_levels
+                    if sl in LINKEDIN_SENIORITY_CODE
+                ) or None
+
             params = {
                 "keywords": scraper_input.search_term,
                 "location": scraper_input.location,
                 "distance": scraper_input.distance,
-                "f_WT": 2 if scraper_input.is_remote else None,
+                "f_WT": f_wt,
+                "f_E": f_e,
                 "f_JT": (
                     job_type_code(scraper_input.job_type)
                     if scraper_input.job_type
@@ -224,7 +247,15 @@ class LinkedIn(Scraper):
         if full_descr:
             job_details = self._get_job_details(job_id)
             description = job_details.get("description")
-        is_remote = is_job_remote(title, description, location)
+
+        work_format = determine_work_format(
+            filter_work_format=self.scraper_input.work_format,
+            page_work_format=job_details.get("work_format_from_page"),
+            title=title,
+            description=description,
+            location=location,
+            use_keyword_fallback=self.scraper_input.linkedin_use_keyword_work_format_fallback,
+        )
 
         return JobPost(
             id=f"li-{job_id}",
@@ -232,7 +263,8 @@ class LinkedIn(Scraper):
             company_name=company,
             company_url=company_url,
             location=location,
-            is_remote=is_remote,
+            is_remote=is_job_remote(work_format),
+            work_format=work_format,
             date_posted=date_posted,
             job_url=f"{self.base_url}/jobs/view/{job_id}",
             compensation=compensation,
@@ -296,6 +328,7 @@ class LinkedIn(Scraper):
             "job_level": parse_job_level(soup),
             "company_industry": parse_company_industry(soup),
             "job_type": parse_job_type(soup),
+            "work_format_from_page": parse_work_format_from_page(soup),
             "job_url_direct": self._parse_job_url_direct(soup),
             "company_logo": company_logo,
             "job_function": job_function,

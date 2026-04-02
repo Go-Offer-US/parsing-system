@@ -340,6 +340,7 @@ desired_order = [
     "max_amount",
     "currency",
     "is_remote",
+    "work_format",
     "job_level",
     "job_function",
     "listing_type",

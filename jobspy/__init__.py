@@ -12,7 +12,7 @@ from jobspy.google import Google
 from jobspy.indeed import Indeed
 from jobspy.linkedin import LinkedIn
 from jobspy.naukri import Naukri
-from jobspy.model import JobType, Location, JobResponse, Country
+from jobspy.model import Location, JobResponse, Country, WorkFormat, SeniorityLevel
 from jobspy.model import SalarySource, ScraperInput, Site
 from jobspy.util import (
     set_logger_level,
@@ -49,6 +49,9 @@ def scrape_jobs(
     enforce_annual_salary: bool = False,
     verbose: int = 0,
     user_agent: str = None,
+    work_format: str | None = None,
+    seniority_levels: list[str] | None = None,
+    linkedin_use_keyword_work_format_fallback: bool = True,
     **kwargs,
 ) -> pd.DataFrame:
     """
@@ -83,6 +86,16 @@ def scrape_jobs(
 
     country_enum = Country.from_string(country_indeed)
 
+    work_format_enum = WorkFormat(work_format.lower()) if work_format else None
+    # Backward compat: is_remote=True without explicit work_format → treat as Remote
+    if is_remote and work_format_enum is None:
+        work_format_enum = WorkFormat.REMOTE
+    seniority_enum = (
+        [SeniorityLevel(sl.lower()) for sl in seniority_levels]
+        if seniority_levels
+        else None
+    )
+
     scraper_input = ScraperInput(
         site_type=get_site_type(),
         country=country_enum,
@@ -99,6 +112,9 @@ def scrape_jobs(
         linkedin_company_ids=linkedin_company_ids,
         offset=offset,
         hours_old=hours_old,
+        work_format=work_format_enum,
+        seniority_levels=seniority_enum,
+        linkedin_use_keyword_work_format_fallback=linkedin_use_keyword_work_format_fallback,
     )
 
     def scrape_site(site: Site) -> Tuple[str, JobResponse]:
@@ -108,7 +124,7 @@ def scrape_jobs(
         cap_name = site.value.capitalize()
         site_name = "ZipRecruiter" if cap_name == "Zip_recruiter" else cap_name
         site_name = "LinkedIn" if cap_name == "Linkedin" else cap_name
-        create_logger(site_name).info(f"finished scraping")
+        create_logger(site_name).info("finished scraping")
         return site.value, scraped_data
 
     site_to_jobs_dict = {}
@@ -146,6 +162,16 @@ def scrape_jobs(
                 job_data["location"] = Location(
                     **job_data["location"]
                 ).display_location()
+
+            # Convert work_format enum to string and sync is_remote.
+            # Uses same pattern as job_type/interval handling above (Pydantic v2
+            # .dict() returns enum objects, not their string values).
+            raw_wf = job_data.get("work_format")
+            if isinstance(raw_wf, WorkFormat):
+                job_data["work_format"] = raw_wf.value
+                job_data["is_remote"] = raw_wf == WorkFormat.REMOTE
+            elif isinstance(raw_wf, str) and raw_wf:
+                job_data["is_remote"] = raw_wf == WorkFormat.REMOTE.value
 
             # Handle compensation
             compensation_obj = job_data.get("compensation")
