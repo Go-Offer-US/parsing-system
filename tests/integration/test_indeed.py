@@ -9,14 +9,20 @@ import pytest
 
 from jobspy import scrape_jobs
 
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
+
+proxy = os.getenv("PROXY")
+
 pytestmark = pytest.mark.integration
 
-SEARCH_TERM = "Python Developer"
-LOCATION = "United States"
-RESULTS = 3
+SEARCH_TERM = "software engineer"
+LOCATION = "USA"
+RESULTS = 40
 
 EXPECTED_COLUMNS = {"title", "company", "job_url", "location", "date_posted", "description"}
-
 
 def test_indeed_basic_scrape():
     """Indeed returns results and core fields are populated. New params must not crash it."""
@@ -30,6 +36,7 @@ def test_indeed_basic_scrape():
         linkedin_use_keyword_work_format_fallback=False,
         linkedin_fetch_description=True,
         hours_old=24,
+        # proxies=proxy,
     )
 
     assert not df.empty, "Indeed returned no results — possible rate limit or API change"

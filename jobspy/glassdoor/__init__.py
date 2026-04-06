@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import json
 import requests
+from urllib.parse import quote
 from typing import Tuple
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,8 @@ from jobspy.glassdoor.util import (
     get_cursor_for_page,
     parse_compensation,
     parse_location,
+    is_remote_in_description,
+    GLASSDOOR_SENIORITY_VALUE,
 )
 from jobspy.util import (
     extract_emails_from_text,
@@ -27,6 +30,7 @@ from jobspy.model import (
     Scraper,
     ScraperInput,
     Site,
+    WorkFormat,
 )
 
 log = create_logger("Glassdoor")
@@ -61,7 +65,7 @@ class Glassdoor(Scraper):
         self.base_url = self.scraper_input.country.get_glassdoor_url()
 
         self.session = create_session(
-            proxies=self.proxies, ca_cert=self.ca_cert, has_retry=True
+            proxies=self.proxies, ca_cert=self.ca_cert, impersonate="chrome124"
         )
         token = self._get_csrf_token()
         headers["gd-csrf-token"] = token if token else fallback_token
@@ -69,9 +73,11 @@ class Glassdoor(Scraper):
             headers["user-agent"] = self.user_agent
         self.session.headers.update(headers)
 
-        location_id, location_type = self._get_location(
-            scraper_input.location, scraper_input.is_remote
-        )
+        try:
+            location_id, location_type = self._get_location(scraper_input.location)
+        except ValueError as e:
+            log.error(f"Glassdoor: {e}")
+            return JobResponse(jobs=[])
         if location_type is None:
             log.error("Glassdoor: location not parsed")
             return JobResponse(jobs=[])
@@ -121,7 +127,16 @@ class Glassdoor(Scraper):
                 raise GlassdoorException(exc_msg)
             res_json = response.json()[0]
             if "errors" in res_json:
-                raise ValueError("Error encountered in API response")
+                # Glassdoor may return partial errors for non-critical fields (e.g. jobsPageSeoData).
+                # Only fail if the actual job listings data is missing.
+                has_job_data = (
+                    res_json.get("data", {})
+                    .get("jobListings", {})
+                    .get("jobListings") is not None
+                )
+                if not has_job_data:
+                    raise ValueError("Error encountered in API response")
+                log.warning(f"Glassdoor: partial API error (non-critical): {res_json['errors'][0].get('message')}")
         except (
             requests.exceptions.ReadTimeout,
             GlassdoorException,
@@ -153,7 +168,7 @@ class Glassdoor(Scraper):
         """
         Fetches csrf token needed for API by visiting a generic page
         """
-        res = self.session.get(f"{self.base_url}/Job/computer-science-jobs.htm")
+        res = self.session.get(f"{self.base_url}")
         pattern = r'"token":\s*"([^"]+)"'
         matches = re.findall(pattern, res.text)
         token = None
@@ -181,16 +196,41 @@ class Glassdoor(Scraper):
         date_diff = (datetime.now() - timedelta(days=age_in_days)).date()
         date_posted = date_diff if age_in_days is not None else None
 
-        if location_type == "S":
-            is_remote = True
-        else:
-            location = parse_location(location_name)
-
-        compensation = parse_compensation(job["header"])
         try:
             description = self._fetch_job_description(job_id)
-        except:
+        except Exception as e:
+            log.error(f"Glassdoor: error fetching job description: {e}")
             description = None
+
+        # Remote detection rules (job["header"]["locationType"] from GraphQL response,
+        # not to be confused with locationType from the AJAX location-search endpoint):
+        #   "Remote" label            → explicitly remote
+        #   locationType "S" + no name → no city/state specified → remote
+        #   locationType "N"          → country-wide, no physical location → remote
+        #   locationType "S" + name   → state-wide onsite (e.g. "California") → onsite
+        #   locationType "C"          → specific city → onsite
+        # Glassdoor does not distinguish hybrid from onsite in the API response,
+        # so all non-remote jobs default to ONSITE (both require physical presence).
+        
+        is_nationwide = location_type == "N"
+        is_remote_label = location_name == "Remote"
+        is_stateless = location_type == "S" and not location_name
+        if is_remote_label or is_stateless or is_nationwide:
+            is_remote = True
+            work_format = WorkFormat.REMOTE
+        else:
+            location = parse_location(location_name)
+            # Structural detection wasn't conclusive — fall back to description keywords.
+            # Some remote jobs on Glassdoor carry a city/state locationType but mention
+            # "remote" explicitly in the description text.
+            if description and is_remote_in_description(description):
+                is_remote = True
+                work_format = WorkFormat.REMOTE
+            else:
+                is_remote = False
+                work_format = WorkFormat.ONSITE
+
+        compensation = parse_compensation(job["header"])
         company_url = f"{self.base_url}Overview/W-EI_IE{company_id}.htm"
         company_logo = (
             job_data["jobview"].get("overview", {}).get("squareLogoUrl", None)
@@ -211,6 +251,7 @@ class Glassdoor(Scraper):
             location=location,
             compensation=compensation,
             is_remote=is_remote,
+            work_format=work_format,
             description=description,
             emails=extract_emails_from_text(description) if description else None,
             company_logo=company_logo,
@@ -246,7 +287,7 @@ class Glassdoor(Scraper):
                 """,
             }
         ]
-        res = requests.post(url, json=body, headers=headers)
+        res = self.session.post(url, json=body)
         if res.status_code != 200:
             return None
         data = res.json()[0]
@@ -255,21 +296,20 @@ class Glassdoor(Scraper):
             desc = markdown_converter(desc)
         return desc
 
-    def _get_location(self, location: str, is_remote: bool) -> (int, str):
-        if not location or is_remote:
-            return "11047", "STATE"  # remote options
-        url = f"{self.base_url}/findPopularLocationAjax.htm?maxLocationsToReturn=10&term={location}"
+    def _get_location(self, location: str) -> (int, str):
+        if not location:
+            return "11047", "STATE"  # no location given — use worldwide/remote fallback
+        url = f"{self.base_url}/findPopularLocationAjax.htm?maxLocationsToReturn=10&term={quote(location)}"
         res = self.session.get(url)
         if res.status_code != 200:
             if res.status_code == 429:
-                err = f"429 Response - Blocked by Glassdoor for too many requests"
-                log.error(err)
+                log.error("Glassdoor: 429 - blocked for too many requests")
                 return None, None
-            else:
-                err = f"Glassdoor response status code {res.status_code}"
-                err += f" - {res.text}"
-                log.error(f"Glassdoor response status code {res.status_code}")
-                return None, None
+            # 400/403 often happen from non-US IPs — fall back to worldwide location
+            log.warning(
+                f"Glassdoor: {res.status_code} on location lookup, falling back to worldwide (id=11047)"
+            )
+            return "11047", "STATE"
         items = res.json()
 
         if not items:
@@ -298,6 +338,16 @@ class Glassdoor(Scraper):
             filter_params.append({"filterKey": "applicationType", "values": "1"})
         if fromage:
             filter_params.append({"filterKey": "fromAge", "values": str(fromage)})
+        # is_remote=True is treated as remote only when work_format is not explicitly set to something else
+        wants_remote = self.scraper_input.work_format == WorkFormat.REMOTE or (
+            self.scraper_input.is_remote and self.scraper_input.work_format is None
+        )
+        if wants_remote:
+            filter_params.append({"filterKey": "remoteWorkType", "values": "1"})
+        if self.scraper_input.seniority_levels:
+            value = GLASSDOOR_SENIORITY_VALUE.get(self.scraper_input.seniority_levels[0])
+            if value:
+                filter_params.append({"filterKey": "seniorityType", "values": value})
         payload = {
             "operationName": "JobSearchResultsQuery",
             "variables": {

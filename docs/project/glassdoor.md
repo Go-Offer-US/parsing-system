@@ -19,16 +19,24 @@ Glassdoor is scraped via a **private GraphQL API** (`{base_url}/graph`). The scr
 |---|---|
 | Base URL | From `Country.get_glassdoor_url()` (e.g., `https://www.glassdoor.com/`) |
 | API endpoint | `{base_url}/graph` (POST) |
-| Session type | `RequestsRotating` (`is_tls=True` by default via `create_session`) |
-| Retry | Yes (`has_retry=True`) |
+| Session type | `CurlCffiRotating` (`impersonate="chrome124"`) via `create_session(impersonate=...)` |
+| Fallback session | `TLSRotating` (tls_client) if `curl_cffi` is not installed |
+| Retry | No (curl_cffi session; retry was only for `RequestsRotating`) |
 | Max results | Capped at 900 (`self.scraper_input.results_wanted = min(900, ...)`) |
 | Jobs per page | 30 (`numJobsToShow: 30`) |
 | Max pages | 30 |
 | Headers | `jobspy/glassdoor/constant.py` → `headers` dict |
 
+**Why curl_cffi?**  
+Glassdoor is fronted by Cloudflare. Standard `requests` and even `tls_client` sessions are detected and receive a Cloudflare Managed Challenge (HTML page, status 403). `curl_cffi` uses libcurl compiled with BoringSSL — Chrome's actual TLS library — producing a JA3/HTTP2 fingerprint that Cloudflare cannot distinguish from a real browser.
+
+Install: `pip install curl_cffi` or `pip install python-jobspy[cloudflare]`.  
+Without it, the scraper falls back to `tls_client` with a warning, which may work on unprotected IPs.
+
 **Key headers** (from `constant.py`):
 - `gd-csrf-token`: set at runtime (fetched or fallback)
-- Standard browser headers (User-Agent, Accept, etc.)
+- `sec-ch-ua` and `user-agent` must match the same Chrome version to avoid bot detection fingerprint mismatch
+- Standard browser headers (Accept, Origin, Referer, Sec-Fetch-*)
 
 ---
 
@@ -53,14 +61,20 @@ Countries without a third tuple element in the `Country` enum are not supported 
 - Falls back to `fallback_token` from `constant.py` if not found
 
 ### Step 2: Resolve Location
-`_get_location(location, is_remote)`:
-- If `location` is empty or `is_remote=True` → returns `("11047", "STATE")` (hardcoded remote location)
+`_get_location(location)`:
+- If `location` is empty → returns `("11047", "STATE")` (Glassdoor's worldwide/remote entity ID)
 - Otherwise: `GET {base_url}/findPopularLocationAjax.htm?maxLocationsToReturn=10&term={location}`
 - Parses first result:
   - `locationId` → integer
   - `locationType`: `"C"` → `"CITY"`, `"S"` → `"STATE"`, `"N"` → `"COUNTRY"`
 - Returns `(location_id: int, location_type: str)`
-- 429 → logs and returns `(None, None)`, causing early exit
+
+**Error handling in `_get_location()`**:
+- `429` → logs error, returns `(None, None)` → `scrape()` returns empty `JobResponse`
+- `400` / `403` (common from non-US IPs) → logs warning, falls back to `("11047", "STATE")`
+- Any other non-200 → falls back to `("11047", "STATE")`
+
+**Note**: `is_remote` is no longer passed to `_get_location()`. Remote filtering is handled exclusively via the `remoteWorkType` filter param in `_add_payload()`.
 
 ---
 
@@ -99,13 +113,28 @@ Query template: `jobspy/glassdoor/constant.py` → `query_template`
 
 ## Filter Parameters (`filterParams` array)
 
-Each filter is `{"filterKey": "<key>", "values": "<value>"}`:
+Each filter is `{"filterKey": "<key>", "values": "<value>"}` (all values are strings):
 
-| Filter | Key | Value |
+| Filter | Key | Value | Trigger |
+|---|---|---|---|
+| Easy apply | `"applicationType"` | `"1"` | `scraper_input.easy_apply` |
+| Date range | `"fromAge"` | `str(days)` | `scraper_input.hours_old` |
+| Remote work | `"remoteWorkType"` | `"1"` | `work_format=REMOTE` or `is_remote=True` |
+| Seniority | `"seniorityType"` | see table below | `scraper_input.seniority_levels` |
+| Job type | `"jobType"` | see table below | `scraper_input.job_type` |
+
+**Seniority values** (`jobspy/glassdoor/util.py` → `GLASSDOOR_SENIORITY_VALUE`):
+
+| `SeniorityLevel` | API value | Notes |
 |---|---|---|
-| Easy apply | `"applicationType"` | `"1"` |
-| Date range | `"fromAge"` | `str(max(hours_old // 24, 1))` |
-| Job type | `"jobType"` | `scraper_input.job_type.value[0]` |
+| `INTERNSHIP` | `"internship"` | |
+| `ENTRY` | `"entrylevel"` | |
+| `ASSOCIATE` | `"entrylevel"` | No distinct Glassdoor level, mapped to entry |
+| `MID_SENIOR` | `"midseniorlevel"` | |
+| `DIRECTOR` | `"director"` | |
+| `EXECUTIVE` | `"executive"` | |
+
+Only the **first** element of `seniority_levels` is used (Glassdoor API accepts one `seniorityType` value).
 
 **Job type values** (from `JobType` enum `.value[0]`):
 
@@ -115,8 +144,6 @@ Each filter is `{"filterKey": "<key>", "values": "<value>"}`:
 | `PART_TIME` | `"parttime"` |
 | `CONTRACT` | `"contract"` |
 | `INTERNSHIP` | `"internship"` |
-
-Note: `is_remote` is handled by passing location_id `"11047"` with `location_type="STATE"` — not via a filter key.
 
 ---
 
@@ -137,6 +164,8 @@ response.json()[0]
   .data.jobListings.jobListings[]     → list of job data objects
   .data.jobListings.paginationCursors → cursor array for pagination
 ```
+
+**Partial error handling**: Glassdoor occasionally returns `"errors"` alongside valid job data (e.g., `jobsPageSeoData` DNS failure). The scraper checks whether `data.jobListings.jobListings` is present before raising — non-critical errors are logged as warnings and scraping continues.
 
 ---
 
@@ -167,18 +196,36 @@ response.json()[0]
 - `job["header"]["ageInDays"]` → `(datetime.now() - timedelta(days=age_in_days)).date()`
 - `None` if `ageInDays` is absent
 
-### Remote Status (`is_remote`)
-- `job["header"]["locationType"] == "S"` → `is_remote = True`, `location = None`
-- Otherwise: `is_remote = False`, location parsed from `locationName`
+### Remote / Work Format Detection
+
+Remote status is determined from **two fields** in `job["header"]`:
+- `locationType`: granularity of the job's location (`"C"` = city, `"S"` = state/region, `"N"` = country)
+- `locationName`: human-readable location string (e.g., `"San Francisco, CA"`, `"Remote"`, `""`)
+
+**Logic**:
+```python
+if location_name == "Remote" or (location_type == "S" and not location_name):
+    is_remote = True
+    work_format = WorkFormat.REMOTE
+else:
+    location = parse_location(location_name)
+    work_format = None
+```
+
+**Why not just `locationType == "S"`?**  
+State-level onsite jobs (e.g., "California, USA") also carry `locationType = "S"` with a non-empty `locationName`. Checking `locationName` prevents false-positive remote classification.
+
+**`work_format = WorkFormat.ONSITE` for non-remote jobs** — Glassdoor API does not expose a hybrid/onsite distinction. Since both formats require physical office presence, all non-remote jobs are classified as `ONSITE`.
 
 ### Location
 `jobspy/glassdoor/util.py` → `parse_location(location_name)`:
-- Splits `locationName` by `", "` → `city, state` (first two parts)
-- Returns `Location(city=city, state=state)`
+- Returns `None` if `location_name` is empty or `"Remote"`
+- Otherwise splits by `", "` → `Location(city=city, state=state)`
 
 ### Compensation (`compensation`)
 `jobspy/glassdoor/util.py` → `parse_compensation(job["header"])`:
 - `payPeriod` → `CompensationInterval` mapping:
+
   | API value | Interval |
   |---|---|
   | `"ANNUAL"` | `YEARLY` |
@@ -186,17 +233,18 @@ response.json()[0]
   | `"WEEKLY"` | `WEEKLY` |
   | `"DAILY"` | `DAILY` |
   | `"HOURLY"` | `HOURLY` |
+
 - `payPeriodAdjustedPay["p10"]` → `min_amount`
 - `payPeriodAdjustedPay["p90"]` → `max_amount`
 - `payCurrency` → `currency`
-- Returns `None` if `payPeriod` is absent
+- Returns `None` if `payPeriod` or `payPeriodAdjustedPay` is absent
 
 ### Description (separate GraphQL call)
 `_fetch_job_description(job_id)`:
-- `POST {base_url}/graph` with `JobDetailQuery` (inline in `_fetch_job_description`)
+- `POST {base_url}/graph` with `JobDetailQuery` (inline query in the method)
+- Uses **`self.session`** (curl_cffi) — same session as the main search, CSRF token and TLS fingerprint are reused
 - Query fetches `jobview.job.description`
 - Converted per `description_format` (MARKDOWN → `markdown_converter()`)
-- Uses bare `requests.post()` (not session) with current `headers`
 - Returns `None` on non-200 response
 
 ### Emails
@@ -214,7 +262,8 @@ response.json()[0]
 | `company_logo` | `job.overview.squareLogoUrl` |
 | `listing_type` | `job.header.adOrderSponsorshipLevel` |
 | `date_posted` | `job.header.ageInDays` → relative date |
-| `is_remote` | `job.header.locationType == "S"` |
+| `is_remote` | `locationName == "Remote"` or (`locationType == "S"` and empty name) |
+| `work_format` | `WorkFormat.REMOTE` for remote; `WorkFormat.ONSITE` otherwise |
 | `location` | `job.header.locationName` (if not remote) |
 | `compensation` | `job.header.payPeriod/payPeriodAdjustedPay/payCurrency` |
 | `description` | Separate GraphQL `JobDetailQuery` call |
@@ -232,24 +281,33 @@ with ThreadPoolExecutor(max_workers=self.jobs_per_page) as executor:
 
 Each `_process_job` call makes one additional HTTP request (description fetch). 30 jobs/page = up to 30 concurrent requests.
 
+**Rate-limiting implication**: A single page scrape produces ~33 requests (1 CSRF + 1 location + 1 jobs page + 30 descriptions). Cloudflare may block the IP for ~20–40 seconds after a full page fetch. Avoid running multiple scraper instances against the same IP in rapid succession.
+
 ---
 
 ## Error Handling
 
-- 429 from location AJAX → logs and returns `(None, None)` → `scrape()` returns empty `JobResponse`
-- GraphQL response with `"errors"` key → raises `ValueError`, caught, returns empty page
-- `requests.exceptions.ReadTimeout` → caught per page, returns empty page
-- `_fetch_job_description()` wrapped in try/except → `None` on any exception
-- Exception class: `GlassdoorException`
+| Condition | Behavior |
+|---|---|
+| `429` from location AJAX | Logs error, returns `(None, None)` → early exit with empty `JobResponse` |
+| `400`/`403` from location AJAX | Logs warning, falls back to `("11047", "STATE")` worldwide location |
+| GraphQL response with `"errors"` + missing job data | Raises `ValueError`, caught per page, returns empty page |
+| GraphQL response with `"errors"` + job data present | Logs warning (non-critical), continues scraping |
+| `requests.exceptions.ReadTimeout` | Caught per page, returns empty page |
+| `_fetch_job_description()` failure | `description = None`, job still added |
+| Exception class | `GlassdoorException` |
 
 ---
 
 ## Notes for AI Agents
 
-- The CSRF token fetch hits `/Job/computer-science-jobs.htm` — if Glassdoor changes this page structure, the token extraction regex may break; `fallback_token` in `constant.py` is the safety net
-- `is_remote` detection is structural (locationType field), not keyword-based — more reliable than LinkedIn/Google
-- Glassdoor salary uses **percentile estimates** (`p10`/`p90`) not exact figures — these are statistical estimates
-- `ageInDays` gives relative date, not absolute timestamp — date_posted shifts slightly per day
-- The description fetch uses `requests.post()` directly (not the session object) — proxy rotation is bypassed for description fetches
-- `country_indeed` parameter in `scrape_jobs()` maps to `ScraperInput.country` which is also used for Glassdoor domain selection
-- Not all countries have Glassdoor support — `Country` entries without a third tuple value will raise an exception in `glassdoor_domain_value`
+- **Cloudflare bot detection**: The CSRF token page and `/graph` endpoint are both protected. `curl_cffi` with `impersonate="chrome124"` is required for reliable access. Without it, first requests may succeed but subsequent sessions get blocked. IP reputation also matters — residential/US proxies help.
+- **CSRF token fallback**: `fallback_token` in `constant.py` is a hardcoded token that may expire. If scraping fails consistently with 403, update the fallback token by manually fetching a fresh one from `/Job/computer-science-jobs.htm`.
+- **`sec-ch-ua` / `user-agent` version must match**: Chrome version in `sec-ch-ua` header must equal the version in `user-agent`. Mismatch triggers bot detection. Both currently set to Chrome 141.
+- **`is_remote` detection is structural + name-based**, not keyword-based — more reliable than LinkedIn/Google. `locationType == "S"` alone is insufficient (state-wide onsite jobs share the same type).
+- **`work_format` is always set**: Remote jobs get `WorkFormat.REMOTE`, all others get `WorkFormat.ONSITE`. Glassdoor API does not distinguish onsite from hybrid — both require office presence, so they are treated as equivalent.
+- **Seniority filter uses first element only**: Glassdoor API accepts one `seniorityType` per query. Multi-level seniority filtering is not supported.
+- **Salary uses percentile estimates**: `p10`/`p90` are statistical estimates from Glassdoor's salary database, not employer-reported values.
+- **`ageInDays` is relative**: `date_posted` shifts by one day per calendar day. The same job scraped on different days will show different `date_posted`.
+- **`country_indeed` parameter** in `scrape_jobs()` maps to `ScraperInput.country` which is also used for Glassdoor domain selection.
+- Not all countries have Glassdoor support — `Country` entries without a third tuple value will raise an exception in `glassdoor_domain_value`.

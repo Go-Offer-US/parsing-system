@@ -1,4 +1,14 @@
-from jobspy.model import Compensation, CompensationInterval, Location, JobType
+from jobspy.model import Compensation, CompensationInterval, Location, JobType, SeniorityLevel
+
+# Glassdoor seniorityType filter values (from filterOptions in API response)
+GLASSDOOR_SENIORITY_VALUE: dict[SeniorityLevel, str] = {
+    SeniorityLevel.INTERNSHIP: "internship",
+    SeniorityLevel.ENTRY:      "entrylevel",
+    SeniorityLevel.ASSOCIATE:  "entrylevel",    # no distinct key, mapped to entry
+    SeniorityLevel.MID_SENIOR: "midseniorlevel",
+    SeniorityLevel.DIRECTOR:   "director",
+    SeniorityLevel.EXECUTIVE:  "executive",
+}
 
 
 def parse_compensation(data: dict) -> Compensation | None:
@@ -34,6 +44,15 @@ def parse_location(location_name: str) -> Location | None:
         return
     city, _, state = location_name.partition(", ")
     return Location(city=city, state=state)
+
+
+_REMOTE_KEYWORDS = ("remote", "work from home", "wfh", "fully remote", "100% remote")
+
+
+def is_remote_in_description(description: str) -> bool:
+    """Keyword fallback for remote detection when locationType is inconclusive."""
+    text = description.lower()
+    return any(kw in text for kw in _REMOTE_KEYWORDS)
 
 
 def get_cursor_for_page(pagination_cursors, page_num):

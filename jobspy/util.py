@@ -103,6 +103,54 @@ class TLSRotating(RotatingProxySession, tls_client.Session):
         return response
 
 
+class CurlCffiRotating(RotatingProxySession):
+    """
+    Session backed by curl_cffi, which uses libcurl + BoringSSL to produce
+    a Chrome-identical TLS fingerprint.  This bypasses Cloudflare bot-detection
+    far more reliably than tls_client.
+
+    curl_cffi is an optional dependency.  If it is not installed, create_session()
+    falls back to TLSRotating and logs a warning.
+    """
+
+    def __init__(self, proxies=None, impersonate: str = "chrome124"):
+        RotatingProxySession.__init__(self, proxies=proxies)
+        from curl_cffi.requests import Session as CurlSession  # lazy import
+
+        self._session = CurlSession(impersonate=impersonate)
+
+    @property
+    def headers(self):
+        return self._session.headers
+
+    @property
+    def verify(self):
+        return self._session.verify
+
+    @verify.setter
+    def verify(self, value):
+        self._session.verify = value
+
+    def get(self, url, **kwargs):
+        return self._request("GET", url, **kwargs)
+
+    def post(self, url, **kwargs):
+        return self._request("POST", url, **kwargs)
+
+    def _request(self, method, url, **kwargs):
+        # tls_client compatibility: it uses timeout_seconds, curl_cffi uses timeout
+        if "timeout_seconds" in kwargs:
+            kwargs["timeout"] = kwargs.pop("timeout_seconds")
+        if self.proxy_cycle:
+            next_proxy = next(self.proxy_cycle)
+            if next_proxy.get("http") != "http://localhost":
+                kwargs.setdefault("proxies", next_proxy)
+        return self._session.request(method, url, **kwargs)
+
+
+_log = logging.getLogger("JobSpy:util")
+
+
 def create_session(
     *,
     proxies: dict | str | None = None,
@@ -111,11 +159,32 @@ def create_session(
     has_retry: bool = False,
     delay: int = 1,
     clear_cookies: bool = False,
+    impersonate: str | None = None,
 ) -> requests.Session:
     """
     Creates a requests session with optional tls, proxy, and retry settings.
+
+    Args:
+        impersonate: Chrome version string for curl_cffi (e.g. "chrome124").
+                     When set, curl_cffi is used for a browser-grade TLS fingerprint
+                     that bypasses Cloudflare bot-detection.  Falls back to tls_client
+                     if curl_cffi is not installed.  Other parameters are ignored when
+                     impersonate is set.
     :return: A session object
     """
+    if impersonate is not None:
+        try:
+            session = CurlCffiRotating(proxies=proxies, impersonate=impersonate)
+            if ca_cert:
+                session.verify = ca_cert
+            return session
+        except ImportError:
+            _log.warning(
+                "curl_cffi is not installed — falling back to tls_client. "
+                "Install it for better Cloudflare bypass: pip install curl_cffi"
+            )
+            # fall through to tls_client below
+
     if is_tls:
         session = TLSRotating(proxies=proxies)
     else:

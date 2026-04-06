@@ -15,6 +15,7 @@ from jobspy.model import (
     JobResponse,
     JobType,
     DescriptionFormat,
+    WorkFormat,
 )
 from jobspy.util import (
     extract_emails_from_text,
@@ -234,7 +235,8 @@ class Indeed(Scraper):
                 job["recruit"].get("viewJobUrl") if job.get("recruit") else None
             ),
             emails=extract_emails_from_text(description) if description else None,
-            is_remote=is_job_remote(job, description),
+            is_remote=(remote := is_job_remote(job, description)),
+            work_format=WorkFormat.REMOTE if remote else WorkFormat.ONSITE,
             company_addresses=(
                 employer_details["addresses"][0]
                 if employer_details.get("addresses")
