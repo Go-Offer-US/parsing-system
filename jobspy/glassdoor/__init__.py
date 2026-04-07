@@ -136,7 +136,6 @@ class Glassdoor(Scraper):
                 )
                 if not has_job_data:
                     raise ValueError("Error encountered in API response")
-                log.warning(f"Glassdoor: partial API error (non-critical): {res_json['errors'][0].get('message')}")
         except (
             requests.exceptions.ReadTimeout,
             GlassdoorException,

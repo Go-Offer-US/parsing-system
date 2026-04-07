@@ -98,7 +98,7 @@ class Indeed(Scraper):
         query = job_search_query.format(
             what=(f'what: "{search_term}"' if search_term else ""),
             location=(
-                f'location: {{where: "{self.scraper_input.location}", radius: {self.scraper_input.distance}, radiusUnit: MILES}}'
+                self._build_location_filter()
                 if self.scraper_input.location
                 else ""
             ),
@@ -120,7 +120,7 @@ class Indeed(Scraper):
         )
         if not response.ok:
             log.info(
-                f"responded with status code: {response.status_code} (submit GitHub issue if this appears to be a bug)"
+                f"responded with status code: {response.status_code} (submit GitHub issue if this appears to be a bug). Reason: {response.text}"
             )
             return jobs, new_cursor
         data = response.json()
@@ -135,25 +135,23 @@ class Indeed(Scraper):
 
         return job_list, new_cursor
 
-    def _build_filters(self):
+    def _build_location_filter(self) -> str:
+        location = self.scraper_input.location
+        distance = self.scraper_input.distance or 50
+        return f'location: {{where: "{location}", radius: {distance}, radiusUnit: MILES}}'
+
+    def _build_filters(self) -> str:
         """
-        Builds the filters dict for job type/is_remote. If hours_old is provided, composite filter for job_type/is_remote is not possible.
-        IndeedApply: filters: { keyword: { field: "indeedApplyScope", keys: ["DESKTOP"] } }
+        Builds the GraphQL filters string.
+
+        Indeed API accepts only one filter type per request (date, composite, or keyword).
+        When both hours_old and work_format/job_type are set, indeed_filter_priority decides
+        which one is applied. The dropped filter is logged as a warning.
         """
-        filters_str = ""
-        if self.scraper_input.hours_old:
-            filters_str = """
-            filters: {{
-                date: {{
-                  field: "dateOnIndeed",
-                  start: "{start}h"
-                }}
-            }}
-            """.format(
-                start=self.scraper_input.hours_old
-            )
-        elif self.scraper_input.easy_apply:
-            filters_str = """
+        si = self.scraper_input
+
+        if si.easy_apply:
+            return """
             filters: {
                 keyword: {
                   field: "indeedApplyScope",
@@ -161,37 +159,62 @@ class Indeed(Scraper):
                 }
             }
             """
-        elif self.scraper_input.job_type or self.scraper_input.is_remote:
-            job_type_key_mapping = {
-                JobType.FULL_TIME: "CF3CP",
-                JobType.PART_TIME: "75GKK",
-                JobType.CONTRACT: "NJXCK",
-                JobType.INTERNSHIP: "VDTG7",
-            }
 
-            keys = []
-            if self.scraper_input.job_type:
-                key = job_type_key_mapping[self.scraper_input.job_type]
-                keys.append(key)
+        job_type_key_mapping = {
+            JobType.FULL_TIME: "CF3CP",
+            JobType.PART_TIME: "75GKK",
+            JobType.CONTRACT: "NJXCK",
+            JobType.INTERNSHIP: "VDTG7",
+        }
+        attribute_keys: list[str] = []
+        if si.job_type and si.job_type in job_type_key_mapping:
+            attribute_keys.append(job_type_key_mapping[si.job_type])
+        if si.is_remote_search:
+            attribute_keys.append("DSQF7")
 
-            if self.scraper_input.is_remote:
-                keys.append("DSQF7")
+        has_date = bool(si.hours_old)
+        has_attributes = bool(attribute_keys)
 
-            if keys:
-                keys_str = '", "'.join(keys)
-                filters_str = f"""
-                filters: {{
-                  composite: {{
-                    filters: [{{
-                      keyword: {{
-                        field: "attributes",
-                        keys: ["{keys_str}"]
-                      }}
-                    }}]
-                  }}
+        if has_date and has_attributes:
+            if si.indeed_filter_priority == "attributes":
+                log.warning(
+                    f"Indeed: hours_old={si.hours_old} ignored — "
+                    f"indeed_filter_priority='attributes' takes precedence"
+                )
+                has_date = False
+            else:
+                log.warning(
+                    f"Indeed: work_format/job_type filter ignored — "
+                    f"indeed_filter_priority='date' takes precedence (hours_old={si.hours_old})"
+                )
+                has_attributes = False
+
+        if has_date:
+            return f"""
+            filters: {{
+                date: {{
+                  field: "dateOnIndeed",
+                  start: "{si.hours_old}h"
                 }}
-                """
-        return filters_str
+            }}
+            """
+
+        if has_attributes:
+            keys_str = '", "'.join(attribute_keys)
+            return f"""
+            filters: {{
+              composite: {{
+                filters: [{{
+                  keyword: {{
+                    field: "attributes",
+                    keys: ["{keys_str}"]
+                  }}
+                }}]
+              }}
+            }}
+            """
+
+        return ""
 
     def _process_job(self, job: dict) -> JobPost | None:
         """

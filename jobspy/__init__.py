@@ -25,8 +25,8 @@ from jobspy.util import (
 )
 from jobspy.ziprecruiter import ZipRecruiter
 
+log = create_logger("JobSpy")
 
-# Update the SCRAPER_MAPPING dictionary in the scrape_jobs function
 
 def scrape_jobs(
     site_name: str | list[str] | Site | list[Site] | None = None,
@@ -52,6 +52,7 @@ def scrape_jobs(
     work_format: str | None = None,
     seniority_levels: list[str] | None = None,
     linkedin_use_keyword_work_format_fallback: bool = True,
+    indeed_filter_priority: str = "date",
     **kwargs,
 ) -> pd.DataFrame:
     """
@@ -115,6 +116,7 @@ def scrape_jobs(
         work_format=work_format_enum,
         seniority_levels=seniority_enum,
         linkedin_use_keyword_work_format_fallback=linkedin_use_keyword_work_format_fallback,
+        indeed_filter_priority=indeed_filter_priority,
     )
 
     def scrape_site(site: Site) -> Tuple[str, JobResponse]:
@@ -126,6 +128,22 @@ def scrape_jobs(
         site_name = "LinkedIn" if cap_name == "Linkedin" else cap_name
         create_logger(site_name).info("finished scraping")
         return site.value, scraped_data
+
+    # Sites with native support per work format.
+    # If a format is not listed, all sites are assumed to support it.
+    WORK_FORMAT_SUPPORTED_SITES: dict[WorkFormat, set[Site]] = {
+        WorkFormat.HYBRID: {Site.LINKEDIN},
+    }
+
+    supported = WORK_FORMAT_SUPPORTED_SITES.get(work_format_enum)
+    if supported is not None:
+        unsupported = [s for s in scraper_input.site_type if s not in supported]
+        if unsupported:
+            log.warning(
+                f"work_format={work_format_enum.value!r} is only supported by "
+                f"{[s.value for s in supported]}. Skipping: {[s.value for s in unsupported]}"
+            )
+        scraper_input.site_type = [s for s in scraper_input.site_type if s in supported]
 
     site_to_jobs_dict = {}
 

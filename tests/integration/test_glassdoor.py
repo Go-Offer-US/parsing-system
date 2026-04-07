@@ -53,7 +53,7 @@ def test_glassdoor_basic_scrape():
         location="United States",
         work_format="remote",
         seniority_levels=["mid_senior"],
-        results_wanted=100,
+        results_wanted=20,
         hours_old=24,
         # proxies=proxy,
     )

@@ -17,6 +17,7 @@ include = "jobspy"
 markers = [
     "integration: tests that hit real external services (LinkedIn, Indeed, etc.)",
 ]
+addopts = "-s"
 
 [tool.black]
 line-length = 88

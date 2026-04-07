@@ -117,7 +117,7 @@ class LinkedIn(Scraper):
             params = {
                 "keywords": scraper_input.search_term,
                 "location": scraper_input.location,
-                "distance": scraper_input.distance,
+                "distance": None if scraper_input.is_remote_search else scraper_input.distance,
                 "f_WT": f_wt,
                 "f_E": f_e,
                 "f_JT": (

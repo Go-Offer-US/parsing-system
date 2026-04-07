@@ -14,7 +14,7 @@ pytestmark = pytest.mark.integration
 
 SEARCH_TERM = "Product Designer OR UX Designer OR User Experience Designer OR UI/UX Designer OR Senior UI/UX Designer OR Senior Experience Designer OR Senior Product Designer"
 LOCATION = "United States"
-RESULTS = 100  # Keep low to avoid rate limits
+RESULTS = 20  # Keep low to avoid rate limits
 
 
 @pytest.fixture(scope="module")
@@ -25,6 +25,7 @@ def remote_jobs() -> pd.DataFrame:
         search_term=SEARCH_TERM,
         location=LOCATION,
         work_format="remote",
+        is_remote=True,
         seniority_levels=["mid_senior"],
         results_wanted=RESULTS,
         linkedin_use_keyword_work_format_fallback=False,

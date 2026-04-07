@@ -335,10 +335,20 @@ class ScraperInput(BaseModel):
     seniority_levels: list[SeniorityLevel] | None = None
     linkedin_use_keyword_work_format_fallback: bool = True
 
+    # When both hours_old and work_format/job_type are set, Indeed API only accepts
+    # one filter type. "date" keeps recency filtering; "attributes" keeps job attributes.
+    indeed_filter_priority: str = "date"
+
     request_timeout: int = 60
 
     results_wanted: int = 15
     hours_old: int | None = None
+
+    @property
+    def is_remote_search(self) -> bool:
+        if self.work_format is not None:
+            return self.work_format == WorkFormat.REMOTE
+        return self.is_remote
 
 
 class Scraper(ABC):
