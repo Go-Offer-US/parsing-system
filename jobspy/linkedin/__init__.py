@@ -115,7 +115,7 @@ class LinkedIn(Scraper):
                 ) or None
 
             params = {
-                "keywords": scraper_input.search_term,
+                "keywords": scraper_input.linkedin_search_term or scraper_input.search_term,
                 "location": scraper_input.location,
                 "distance": None if scraper_input.is_remote_search else scraper_input.distance,
                 "f_WT": f_wt,
